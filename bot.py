@@ -1,16 +1,19 @@
-from aiohttp import (
-    ClientResponseError,
-    ClientSession,
-    ClientTimeout
-)
+from aiohttp import ClientResponseError, ClientSession, ClientTimeout
 from aiohttp_socks import ProxyConnector
 from fake_useragent import FakeUserAgent
 from curl_cffi import requests
 from datetime import datetime
-from colorama import *
 import asyncio, time, base64, json, os, uuid, pytz
 
+from rich.live import Live
+from rich.layout import Layout
+from rich.panel import Panel
+from rich.text import Text
+from rich.console import Console
+
+# Set zona waktu
 wib = pytz.timezone('Asia/Jakarta')
+console = Console()
 
 class Nodepay:
     def __init__(self) -> None:
@@ -28,31 +31,50 @@ class Nodepay:
         self.proxy_index = 0
         self.account_proxies = {}
 
-    def clear_terminal(self):
-        os.system('cls' if os.name == 'nt' else 'clear')
+        # Counter UI
+        self.total_accounts = 0
+        self.success_count = 0
+        self.processing_count = 0
+        self.fail_count = 0
+
+        # Daftar untuk menyimpan log (akan ditampilkan di panel bawah)
+        self.log_lines = []
 
     def log(self, message):
-        print(
-            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
-            f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}{message}",
-            flush=True
-        )
+        """Tambahkan pesan log dengan timestamp ke daftar log."""
+        timestamp = datetime.now().astimezone(wib).strftime('%x %X %Z')
+        self.log_lines.append(f"[{timestamp}] {message}")
 
     def welcome(self):
-        print(
-            f"""
-        {Fore.GREEN + Style.BRIGHT}Auto Ping {Fore.BLUE + Style.BRIGHT}Nodepay - BOT
-            """
-            f"""
-        {Fore.GREEN + Style.BRIGHT}Rey? {Fore.YELLOW + Style.BRIGHT}<INI WATERMARK>
-            """
-        )
+        welcome_text = "Auto Ping Nodepay - BOT\nRey? <INI WATERMARK>"
+        self.log(welcome_text)
 
-    def format_seconds(self, seconds):
-        hours, remainder = divmod(seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
-    
+    def make_layout(self):
+        """Membuat layout dengan header status di atas dan panel log di bawah."""
+        header_text = (
+            "═══════════════════════\n"
+            f"✅ Akun Berhasil : {self.success_count}\n"
+            f"⏳ Akun Diproses : {self.processing_count}\n"
+            f"❌ Akun Gagal : {self.fail_count}\n"
+            "═══════════════════════"
+        )
+        header_panel = Panel(Text(header_text, justify="center"), title="Status")
+        # Tampilkan 20 log terakhir
+        log_text = "\n".join(self.log_lines[-20:])
+        log_panel = Panel(Text(log_text), title="Log yang berjalan", height=20)
+        layout = Layout()
+        layout.split_column(
+            Layout(header_panel, size=7),
+            Layout(log_panel)
+        )
+        return layout
+
+    async def ui_updater(self, live):
+        """Task yang secara berkala memperbarui tampilan UI."""
+        while True:
+            live.update(self.make_layout())
+            await asyncio.sleep(1)
+
     async def load_proxies(self, use_proxy_choice: int):
         filename = "proxy.txt"
         try:
@@ -66,22 +88,19 @@ class Nodepay:
                         self.proxies = content.splitlines()
             else:
                 if not os.path.exists(filename):
-                    self.log(f"{Fore.RED + Style.BRIGHT}File {filename} Not Found.{Style.RESET_ALL}")
+                    self.log(f"File {filename} Not Found.")
                     return
                 with open(filename, 'r') as f:
                     self.proxies = f.read().splitlines()
-            
+
             if not self.proxies:
-                self.log(f"{Fore.RED + Style.BRIGHT}No Proxies Found.{Style.RESET_ALL}")
+                self.log("No Proxies Found.")
                 return
 
-            self.log(
-                f"{Fore.GREEN + Style.BRIGHT}Proxies Total  : {Style.RESET_ALL}"
-                f"{Fore.WHITE + Style.BRIGHT}{len(self.proxies)}{Style.RESET_ALL}"
-            )
-        
+            self.log(f"Proxies Total: {len(self.proxies)}")
+
         except Exception as e:
-            self.log(f"{Fore.RED + Style.BRIGHT}Failed To Load Proxies: {e}{Style.RESET_ALL}")
+            self.log(f"Failed To Load Proxies: {e}")
             self.proxies = []
 
     def check_proxy_schemes(self, proxies):
@@ -106,59 +125,45 @@ class Nodepay:
         self.account_proxies[account] = proxy
         self.proxy_index = (self.proxy_index + 1) % len(self.proxies)
         return proxy
-    
+
     def decode_token(self, token: str):
         try:
             header, payload, signature = token.split(".")
             decoded_payload = base64.urlsafe_b64decode(payload + "==").decode("utf-8")
             parsed_payload = json.loads(decoded_payload)
             user_id = parsed_payload["sub"]
-            
             return user_id
-        except Exception as e:
+        except Exception:
             return None
-            
-    def generate_browser_id(self):
-        browser_id = str(uuid.uuid4())
-        return browser_id
-    
-    def mask_account(self, account):
-        mask_account = account[:3] + '*' * 3 + account[-3:]
-        return mask_account
-    
-    def print_message(self, account, proxy, color, message):
-        self.log(
-            f"{Fore.CYAN + Style.BRIGHT}[ Account:{Style.RESET_ALL}"
-            f"{Fore.WHITE + Style.BRIGHT} {account} {Style.RESET_ALL}"
-            f"{Fore.MAGENTA + Style.BRIGHT}-{Style.RESET_ALL}"
-            f"{Fore.CYAN + Style.BRIGHT} Proxy: {Style.RESET_ALL}"
-            f"{Fore.WHITE + Style.BRIGHT}{proxy}{Style.RESET_ALL}"
-            f"{Fore.MAGENTA + Style.BRIGHT} - {Style.RESET_ALL}"
-            f"{Fore.CYAN + Style.BRIGHT}Status:{Style.RESET_ALL}"
-            f"{color + Style.BRIGHT} {message} {Style.RESET_ALL}"
-            f"{Fore.CYAN + Style.BRIGHT}]{Style.RESET_ALL}"
-        )
 
-    def print_question(self):
+    def generate_browser_id(self):
+        return str(uuid.uuid4())
+
+    def mask_account(self, account):
+        return account[:3] + '*' * 3 + account[-3:]
+
+    def print_message(self, account, proxy, message):
+        self.log(f"[Account: {account}] [Proxy: {proxy}] {message}")
+
+    async def print_question(self):
         while True:
             try:
-                print("1. Run With Monosans Proxy")
-                print("2. Run With Private Proxy")
-                print("3. Run Without Proxy")
-                choose = int(input("Choose [1/2/3] -> ").strip())
-
-                if choose in [1, 2, 3]:
+                self.log("1. Run With Monosans Proxy")
+                self.log("2. Run With Private Proxy")
+                self.log("3. Run Without Proxy")
+                choice = int(console.input("Choose [1/2/3] -> ").strip())
+                if choice in [1, 2, 3]:
                     proxy_type = (
-                        "Run With Monosans Proxy" if choose == 1 else 
-                        "Run With Private Proxy" if choose == 2 else 
+                        "Run With Monosans Proxy" if choice == 1 else
+                        "Run With Private Proxy" if choice == 2 else
                         "Run Without Proxy"
                     )
-                    print(f"{Fore.GREEN + Style.BRIGHT}{proxy_type} Selected.{Style.RESET_ALL}")
-                    return choose
+                    self.log(f"{proxy_type} Selected.")
+                    return choice
                 else:
-                    print(f"{Fore.RED + Style.BRIGHT}Please enter either 1, 2 or 3.{Style.RESET_ALL}")
+                    self.log("Please enter either 1, 2 or 3.")
             except ValueError:
-                print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number (1, 2 or 3).{Style.RESET_ALL}")
+                self.log("Invalid input. Enter a number (1, 2 or 3).")
 
     async def user_session(self, token: str, proxy=None, retries=5):
         url = "http://api.nodepay.ai/api/auth/session"
@@ -174,10 +179,8 @@ class Nodepay:
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.post(url=url, headers=headers, json={}) as response:
                         if response.status == 401:
-                            return self.print_message(self.mask_account(token), proxy, Fore.RED, 
-                                f"GET User Session Failed: {Fore.YELLOW+Style.BRIGHT}Np Token Expired"
-                            )
-                        
+                            self.print_message(self.mask_account(token), proxy, "GET User Session Failed: Np Token Expired")
+                            return None
                         response.raise_for_status()
                         result = await response.json()
                         return result['data']
@@ -185,9 +188,9 @@ class Nodepay:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
                     continue
+                self.print_message(self.mask_account(token), proxy, f"GET User Session Failed: {str(e)}")
+                return None
 
-                return self.print_message(self.mask_account(token), proxy, Fore.RED, f"GET User Session Failed: {Fore.YELLOW+Style.BRIGHT}{str(e)}")
-            
     async def user_earning(self, token: str, username: str, proxy=None, retries=5):
         url = "http://api.nodepay.ai/api/earn/info"
         headers = {
@@ -201,10 +204,8 @@ class Nodepay:
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.get(url=url, headers=headers) as response:
                         if response.status == 401:
-                            return self.print_message(username, proxy, Fore.RED, 
-                                f"GET Earning Data Failed: {Fore.YELLOW+Style.BRIGHT}Np Token Expired"
-                            )
-                        
+                            self.print_message(username, proxy, "GET Earning Data Failed: Np Token Expired")
+                            return None
                         response.raise_for_status()
                         result = await response.json()
                         return result['data']
@@ -212,9 +213,9 @@ class Nodepay:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
                     continue
+                self.print_message(username, proxy, f"GET Earning Data Failed: {str(e)}")
+                return None
 
-                return self.print_message(username, proxy, Fore.RED, f"GET Earning Data Failed: {Fore.YELLOW+Style.BRIGHT}{str(e)}")
-    
     async def mission_lists(self, token: str, username: str, proxy=None, retries=5):
         url = "http://api.nodepay.ai/api/mission"
         headers = {
@@ -228,10 +229,8 @@ class Nodepay:
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.get(url=url, headers=headers) as response:
                         if response.status == 401:
-                            return self.print_message(username, proxy, Fore.RED, 
-                                f"GET Available Mission Failed: {Fore.YELLOW+Style.BRIGHT}Np Token Expired"
-                            )
-                        
+                            self.print_message(username, proxy, "GET Available Mission Failed: Np Token Expired")
+                            return None
                         response.raise_for_status()
                         result = await response.json()
                         return result['data']
@@ -239,12 +238,12 @@ class Nodepay:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
                     continue
+                self.print_message(username, proxy, f"GET Available Mission Failed: {str(e)}")
+                return None
 
-                return self.print_message(username, proxy, Fore.RED, f"GET Available Mission Failed: {Fore.YELLOW+Style.BRIGHT}{str(e)}")
-    
     async def complete_missions(self, token: str, username: str, mission_id: str, proxy=None, retries=5):
         url = "http://api.nodepay.ai/api/mission/complete-mission"
-        data = json.dumps({'mission_id':mission_id})
+        data = json.dumps({'mission_id': mission_id})
         headers = {
             **self.headers,
             "Authorization": f"Bearer {token}",
@@ -257,10 +256,8 @@ class Nodepay:
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.post(url=url, headers=headers, data=data) as response:
                         if response.status == 401:
-                            return self.print_message(username, proxy, Fore.RED, 
-                                f"Complete Available Mission Failed: {Fore.YELLOW+Style.BRIGHT}Np Token Expired"
-                            )
-                        
+                            self.print_message(username, proxy, "Complete Available Mission Failed: Np Token Expired")
+                            return None
                         response.raise_for_status()
                         result = await response.json()
                         return result['data']
@@ -268,12 +265,17 @@ class Nodepay:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
                     continue
+                self.print_message(username, proxy, f"Complete Available Mission Failed: {str(e)}")
+                return None
 
-                return self.print_message(username, proxy, Fore.RED, f"Complete Available Mission Failed: {Fore.YELLOW+Style.BRIGHT}{str(e)}")
-            
     async def send_ping(self, token: str, user_id: str, username: str, browser_id: str, num_id: int, use_proxy: bool, proxy=None, retries=5):
         url = "https://nw.nodepay.org/api/network/ping"
-        data = json.dumps({"id":user_id, "browser_id":browser_id, "timestamp":int(time.time()), "version":"2.2.7"})
+        data = json.dumps({
+            "id": user_id,
+            "browser_id": browser_id,
+            "timestamp": int(time.time()),
+            "version": "2.2.7"
+        })
         headers = {
             "Accept": "*/*",
             "Accept-Language": "en-US,en;q=0.9",
@@ -288,18 +290,13 @@ class Nodepay:
         }
         for attempt in range(retries):
             try:
-                response = await asyncio.to_thread(requests.post, url=url, headers=headers, data=data, proxy=proxy, timeout=60, impersonate="safari15_5")
+                response = await asyncio.to_thread(
+                    requests.post, url=url, headers=headers, data=data,
+                    proxy=proxy, timeout=60, impersonate="safari15_5"
+                )
                 if response.status_code == 401:
-                    return self.print_message(username, proxy, Fore.RED, 
-                        f"PING Failed"
-                        f"{Fore.MAGENTA + Style.BRIGHT} - {Style.RESET_ALL}"
-                        f"{Fore.CYAN + Style.BRIGHT}Browser ID {num_id}:{Style.RESET_ALL}"
-                        f"{Fore.WHITE + Style.BRIGHT} {browser_id} {Style.RESET_ALL}"
-                        f"{Fore.MAGENTA + Style.BRIGHT}-{Style.RESET_ALL}"
-                        f"{Fore.CYAN + Style.BRIGHT} Reason: {Style.RESET_ALL}"
-                        f"{Fore.YELLOW + Style.BRIGHT}Np Token Expired{Style.RESET_ALL}"
-                    )
-                        
+                    self.print_message(username, proxy, f"PING Failed - Browser ID {num_id}: {browser_id} - Reason: Np Token Expired")
+                    return None
                 response.raise_for_status()
                 result = response.json()
                 return result['data']['ip_score']
@@ -307,23 +304,14 @@ class Nodepay:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
                     continue
-
-                self.print_message(username, proxy, Fore.RED, 
-                    f"PING Failed"
-                    f"{Fore.MAGENTA + Style.BRIGHT} - {Style.RESET_ALL}"
-                    f"{Fore.CYAN + Style.BRIGHT}Browser ID {num_id}:{Style.RESET_ALL}"
-                    f"{Fore.WHITE + Style.BRIGHT} {browser_id} {Style.RESET_ALL}"
-                    f"{Fore.MAGENTA + Style.BRIGHT}-{Style.RESET_ALL}"
-                    f"{Fore.CYAN + Style.BRIGHT} Reason: {Style.RESET_ALL}"
-                    f"{Fore.YELLOW + Style.BRIGHT}{str(e)}{Style.RESET_ALL}"
-                )
-                proxy = self.rotate_proxy_for_account(browser_id) if use_proxy else None
+                self.print_message(username, proxy, f"PING Failed - Browser ID {num_id}: {browser_id} - Reason: {str(e)}")
+                if use_proxy:
+                    proxy = self.rotate_proxy_for_account(browser_id)
                 return None
-            
+
     async def process_user_earning(self, token: str, user_id: str, username: str, use_proxy: bool):
         while True:
             proxy = self.get_next_proxy_for_account(user_id) if use_proxy else None
-
             earning = await self.user_earning(token, username, proxy)
             if earning:
                 season_name = earning.get('season_name', 'Season #N/A')
@@ -331,25 +319,13 @@ class Nodepay:
                 total_point = earning.get('total_earning', 'N/A')
                 current_point = earning.get('current_point', 'N/A')
                 pending_point = earning.get('pending_point', 'N/A')
-
-                self.print_message(username, proxy, Fore.WHITE, 
-                    f"Earning {season_name}"
-                    f"{Fore.MAGENTA + Style.BRIGHT} - {Style.RESET_ALL}"
-                    f"{Fore.WHITE + Style.BRIGHT}Today {today_point} PTS{Style.RESET_ALL}"
-                    f"{Fore.MAGENTA + Style.BRIGHT} - {Style.RESET_ALL}"
-                    f"{Fore.WHITE + Style.BRIGHT}Total {total_point} PTS{Style.RESET_ALL}"
-                    f"{Fore.MAGENTA + Style.BRIGHT} - {Style.RESET_ALL}"
-                    f"{Fore.WHITE + Style.BRIGHT}Current {current_point} PTS{Style.RESET_ALL}"
-                    f"{Fore.MAGENTA + Style.BRIGHT} - {Style.RESET_ALL}"
-                    f"{Fore.WHITE + Style.BRIGHT}Pending {pending_point} PTS{Style.RESET_ALL}"
-                )
-
+                self.print_message(username, proxy,
+                    f"Earning {season_name} - Today {today_point} PTS - Total {total_point} PTS - Current {current_point} PTS - Pending {pending_point} PTS")
             await asyncio.sleep(30 * 60)
 
     async def process_user_missions(self, token: str, user_id: str, username: str, use_proxy: bool):
         while True:
             proxy = self.get_next_proxy_for_account(user_id) if use_proxy else None
-
             missions = await self.mission_lists(token, username, proxy)
             if missions:
                 completed = False
@@ -358,88 +334,51 @@ class Nodepay:
                     title = mission['title']
                     reward = mission['point']
                     status = mission['status']
-
                     if mission and status == "AVAILABLE":
                         complete = await self.complete_missions(token, username, mission_id, proxy)
                         if complete:
-                            self.print_message(username, proxy, Fore.WHITE, 
-                                f"Mission {title}"
-                                f"{Fore.GREEN + Style.BRIGHT} Is Completed {Style.RESET_ALL}"
-                                f"{Fore.MAGENTA + Style.BRIGHT}-{Style.RESET_ALL}"
-                                f"{Fore.CYAN + Style.BRIGHT} Reward: {Style.RESET_ALL}"
-                                f"{Fore.WHITE + Style.BRIGHT}{reward} PTS{Style.RESET_ALL}"
-                            )
+                            self.print_message(username, proxy, f"Mission {title} Is Completed - Reward: {reward} PTS")
                         else:
-                            self.print_message(username, proxy, Fore.WHITE, 
-                                f"Mission {title} "
-                                f"{Fore.RED + Style.BRIGHT}Isn't Completed{Style.RESET_ALL}"
-                            )
-
+                            self.print_message(username, proxy, f"Mission {title} Isn't Completed")
                     else:
                         completed = True
-
                 if completed:
-                    self.print_message(username, proxy, Fore.GREEN, 
-                        f"All Available Mission Is Completed"
-                    )
-
+                    self.print_message(username, proxy, "All Available Mission Is Completed")
             await asyncio.sleep(12 * 60 * 60)
 
     async def connection_state(self, token: str, user_id, username: str, browser_id: str, num_id: int, use_proxy: bool):
         while True:
             proxy = self.get_next_proxy_for_account(browser_id) if use_proxy else None
-
-            print(
-                f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
-                f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}"
-                f"{Fore.BLUE + Style.BRIGHT}Try to Sent Ping...{Style.RESET_ALL}                                   ",
-                end="\r",
-                flush=True
-            )
-
+            self.log(f"Trying to send Ping for Browser ID {num_id}: {browser_id}...")
             result = await self.send_ping(token, user_id, username, browser_id, num_id, use_proxy, proxy)
-            if result:
-                self.print_message(username, proxy, Fore.GREEN, 
-                    f"PING Success"
-                    f"{Fore.MAGENTA + Style.BRIGHT} - {Style.RESET_ALL}"
-                    f"{Fore.CYAN + Style.BRIGHT}Browser ID {num_id}:{Style.RESET_ALL}"
-                    f"{Fore.WHITE + Style.BRIGHT} {browser_id} {Style.RESET_ALL}"
-                    f"{Fore.MAGENTA + Style.BRIGHT}-{Style.RESET_ALL}"
-                    f"{Fore.CYAN + Style.BRIGHT} IP Score: {Style.RESET_ALL}"
-                    f"{Fore.WHITE + Style.BRIGHT}{result}{Style.RESET_ALL}"
-                )
-
-            print(
-                f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
-                f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}"
-                f"{Fore.BLUE + Style.BRIGHT}Wait For 55 Minutes For Next Ping...{Style.RESET_ALL}",
-                end="\r"
-            )
+            if result is not None:
+                self.print_message(username, proxy, f"PING Success - Browser ID {num_id}: {browser_id} - IP Score: {result}")
+            self.log("Waiting for 55 Minutes for next Ping...")
             await asyncio.sleep(55 * 60)
-            
+
     async def process_get_user_session(self, token: str, user_id: str, use_proxy: bool):
         proxy = self.get_next_proxy_for_account(user_id) if use_proxy else None
         user = None
         while user is None:
             user = await self.user_session(token, proxy)
             if not user:
+                self.fail_count += 1
+                self.processing_count -= 1
                 proxy = self.rotate_proxy_for_account(user_id) if use_proxy else None
                 await asyncio.sleep(5)
                 continue
-
-            self.print_message(self.mask_account(token), proxy, Fore.GREEN, f"GET User Session Success")
-
+            self.print_message(self.mask_account(token), proxy, "GET User Session Success")
+            self.success_count += 1
+            self.processing_count -= 1
             return user
-        
+
     async def process_accounts(self, token: str, user_id: str, use_proxy: bool):
         user = await self.process_get_user_session(token, user_id, use_proxy)
         if user:
             username = user.get("name")
-
             tasks = []
             tasks.append(asyncio.create_task(self.process_user_earning(token, user_id, username, use_proxy)))
             tasks.append(asyncio.create_task(self.process_user_missions(token, user_id, username, use_proxy)))
-
             if use_proxy:
                 for i in range(3):
                     num_id = i + 1
@@ -449,57 +388,40 @@ class Nodepay:
                 num_id = 1
                 browser_id = self.generate_browser_id()
                 tasks.append(asyncio.create_task(self.connection_state(token, user_id, username, browser_id, num_id, use_proxy)))
-
             await asyncio.gather(*tasks)
-        
+
     async def main(self):
         try:
             with open('tokens.txt', 'r') as file:
                 tokens = [line.strip() for line in file if line.strip()]
-
-            use_proxy_choice = self.print_question()
-
+            use_proxy_choice = await self.print_question()
             use_proxy = False
             if use_proxy_choice in [1, 2]:
                 use_proxy = True
-
-            self.clear_terminal()
-            self.welcome()
-            self.log(
-                f"{Fore.GREEN + Style.BRIGHT}Account's Total: {Style.RESET_ALL}"
-                f"{Fore.WHITE + Style.BRIGHT}{len(tokens)}{Style.RESET_ALL}"
-            )
-
+            self.total_accounts = len(tokens)
+            self.processing_count = self.total_accounts
             if use_proxy:
                 await self.load_proxies(use_proxy_choice)
-
-            self.log(f"{Fore.CYAN + Style.BRIGHT}-{Style.RESET_ALL}"*75)
-
-            while True:
-                tasks = []
-                for token in tokens:
-                    if token:
-                        user_id = self.decode_token(token)
-
-                        if user_id:
-                            tasks.append(self.process_accounts(token, user_id, use_proxy))
-
-                await asyncio.gather(*tasks)
-                await asyncio.sleep(10)
-
+            # Mulai UI Live sehingga header selalu terlihat di atas dan log di bawah
+            with Live(self.make_layout(), refresh_per_second=1, screen=True) as live:
+                ui_task = asyncio.create_task(self.ui_updater(live))
+                while True:
+                    tasks = []
+                    for token in tokens:
+                        if token:
+                            user_id = self.decode_token(token)
+                            if user_id:
+                                tasks.append(self.process_accounts(token, user_id, use_proxy))
+                    await asyncio.gather(*tasks)
+                    await asyncio.sleep(10)
         except FileNotFoundError:
-            self.log(f"{Fore.RED}File 'tokens.txt' Not Found.{Style.RESET_ALL}")
-            return
+            self.log("File 'tokens.txt' Not Found.")
         except Exception as e:
-            self.log(f"{Fore.RED+Style.BRIGHT}Error: {e}{Style.RESET_ALL}")
+            self.log(f"Error: {e}")
 
 if __name__ == "__main__":
     try:
         bot = Nodepay()
         asyncio.run(bot.main())
     except KeyboardInterrupt:
-        print(
-            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
-            f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}"
-            f"{Fore.RED + Style.BRIGHT}[ EXIT ] Nodepay - BOT{Style.RESET_ALL}                                       "                              
-        )
+        print("Exiting Nodepay BOT")
